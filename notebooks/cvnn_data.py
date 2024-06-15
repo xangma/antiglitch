@@ -102,7 +102,7 @@ def get_data(datadir):
 	return distributions, glitches, ifos, ml_models
 
 def noise_function(x):
-	noise_generator_function = lambda x: np.random.normal(0, 1, len(x)) + 1j * np.random.normal(0, 1, len(x))
+	noise_generator_function = lambda x: rng.normal(0, 1, len(x)) + 1j * rng.normal(0, 1, len(x))
 	noise = np.array([noise_generator_function(x) for x in x])
 	x += noise
 	return x
@@ -111,7 +111,7 @@ def phase_shift(x, shift=np.pi):
 	"""Multiply by e^i*shift"""
 	phase_shifts = []
 	for i in range(len(x)):
-		phase_shift = rng.choice([-np.pi, 0, np.pi],)
+		phase_shift = rng.choice([-np.pi, 0],)
 		if phase_shift != 0:
 			x[i] = x[i] * np.exp(1j * phase_shift)
 		phase_shifts.append(phase_shift)
@@ -178,7 +178,7 @@ class GlitchDataset(torch.utils.data.TensorDataset):
 			x_arr, y_arr = [], []
 			if cachedataset_prefix + str(size) + '.npz' not in os.listdir(datadir):
 				for i in range(size):
-					x, y = get_snip(ifos, ml_models)
+					x, y = get_snip(distributions, glitches, ifos, ml_models)
 					x_arr.append(x)
 					y_arr.append(y)
 				x_arr = np.array(x_arr)
@@ -274,9 +274,9 @@ class GlitchDataset(torch.utils.data.TensorDataset):
 def gen_sample(distributions,ifo, ml_model, tosample=['f0', 'gbw', 'amp_r', 'amp_i', 'time']):
     res = {key:None for key in tosample}
     for key in tosample:
-        draw = np.random.choice(distributions[ifo][ml_model][key])
+        draw = rng.choice(distributions[ifo][ml_model][key])
         draw_sd = distributions[ifo][ml_model][key + '_sd'][distributions[ifo][ml_model][key].index(draw)]
-        draw_final = np.random.normal(draw, draw_sd)
+        draw_final = rng.normal(draw, draw_sd)
         res[key] = draw_final
     return res
 
@@ -287,9 +287,9 @@ SnippetNormed = type('SnippetNormed', (antiglitch.SnippetNormed,), {'__init__': 
 
 def get_snip(distributions, glitches, ifos, ml_models, tosample=['f0', 'gbw', 'amp_r', 'amp_i', 'time']):
 		# randomly select a glitch
-		ifo = np.random.choice(ifos)
-		ml_model = np.random.choice(ml_models)
-		glitch_num = np.random.choice(glitches[ifo][ml_model])
+		ifo = rng.choice(ifos)
+		ml_model = rng.choice(ml_models)
+		glitch_num = rng.choice(distributions[ifo][ml_model]['num'])
 		glitch_invasd = glitches[ifo][ml_model][glitch_num]['invasd']
 		# create a SnippetNormed object
 		snip = SnippetNormed(glitch_invasd)
@@ -304,6 +304,6 @@ def get_snip(distributions, glitches, ifos, ml_models, tosample=['f0', 'gbw', 'a
 		x = snip.fglitch
 		# check for nans
 		if np.isnan(x).any():
-			return get_snip(ifos, ml_models, tosample)
+			return get_snip(distributions, glitches, ifos, ml_models, tosample)
 		y = (snip.inf['f0'], snip.inf['gbw'])
 		return x, y
