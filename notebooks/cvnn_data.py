@@ -10,7 +10,8 @@ rfft = partial(rfft, norm='ortho')
 irfft = partial(irfft, norm='ortho')
 
 import torch
-
+import sys
+sys.path.append('/Users/xangm/OneDrive/repos/antiglitch')
 import antiglitch
 from antiglitch.utils import to_fd
 
@@ -77,7 +78,7 @@ def get_data(datadir):
 					glitches[ifo][ml_model][num]['invasd'] = snip.invasd
 					glitches[ifo][ml_model][num]['psd'] = np.load(datadir + ifo + '-'+ ml_model + '-' + f'{num:04d}' + '.npz')['psd']
 				# except:
-				#     pass
+				#	 pass
 	ml_label_map = {'Blip_Low_Frequency':'lowblip', 'Blip':'blip', 'Koi_Fish':'koi', 'Tomte':'tomte'}
 	results_keys = ['f0', 'f0_sd', 'gbw', 'gbw_sd', 'amp_r', 'amp_r_sd', 'amp_i', 'amp_i_sd', 'time', 'time_sd', 'num']
 	nums = list(results['num'].values())
@@ -150,6 +151,25 @@ def normalize(x, dryrun=False):
 		print(f"x_mean: {x_mean}, x_std: {x_std}")
 		return x, x_mean, x_std
 
+
+def prewhiten_sample(x, eps=1e-12):
+	"""Per-example amplitude & phase normalisation."""
+	# 1. energy-normalise (amplitude invariance)
+	x = x / np.sqrt(np.sum(np.abs(x)**2) + eps)
+
+	# 2. remove a single global phase (π-flip invariance)
+	x = x * np.exp(-1j * np.angle(x[0]))
+
+	# 3. remove linear phase ramp (time-shift invariance)
+	freqs = np.linspace(0, 4096, len(x))
+	phase = np.unwrap(np.angle(x))
+	slope, intercept = np.polyfit(freqs, phase, 1)
+	phase_detrended = phase - (slope*freqs + intercept)
+
+	# 4. return magnitude + detrended phase as complex pair
+	return np.abs(x) + 1j*phase_detrended
+
+
 class GlitchDataset(torch.utils.data.TensorDataset):
 	def __init__(self, datadir, ifos, ml_models, glitches, distributions, tr_size, te_size, device, noise=True, aug_phase=True, aug_time=True, split='train', outtype='complex', train_data=None, cachedataset_prefix="antiglitch_cvnn_dataset_clean"):
 		self.datadir = datadir
@@ -198,6 +218,7 @@ class GlitchDataset(torch.utils.data.TensorDataset):
 			if aug_time:
 				# Apply the time shifts to the frequency domain signals
 				tr_x_arr, self.tr_time_shifts = time_shift(tr_x_arr)
+			tr_x_arr = np.array([prewhiten_sample(x) for x in tr_x_arr])
 			if outtype == 'complex':
 				print("Normalizing x train data (complex)")
 				self.x_arr, self.tr_x_mean_real, self.tr_x_std_real, self.tr_x_mean_imag, self.tr_x_std_imag = normalize(tr_x_arr)
@@ -210,16 +231,17 @@ class GlitchDataset(torch.utils.data.TensorDataset):
 				print("Normalizing x train data (real)")
 				self.x_arr, self.tr_x_mean, self.tr_x_std = normalize(tr_x_arr_irfft)
 				self.x_arr = torch.tensor(self.x_arr, device=device, dtype=torch.float32)
-    
 			# normalize training y_arr
 			tr_y_arr = tr_data['y_arr']
 			print("Normalizing y train data (y1)")
-			tr_y_arr[:,0], self.tr_y1_mean, self.tr_y1_std = normalize(tr_y_arr[:,0])
-			print("Normalizing y train data (y2)")
-			tr_y_arr[:,1], self.tr_y2_mean, self.tr_y2_std = normalize(tr_y_arr[:,1])
+			for k in range(5):
+
+				tr_y_arr[:, k], mu, sigma = normalize(tr_y_arr[:, k])
+				setattr(self, f"tr_y{k}_mean",  mu)
+				setattr(self, f"tr_y{k}_std",   sigma)
 			self.y_arr = tr_y_arr
 			self.y_arr = torch.tensor(self.y_arr, device=device, dtype=torch.float32)
-   
+
 		if split == 'test':
 			# check train_data has been passed
 			if train_data is None:
@@ -235,6 +257,7 @@ class GlitchDataset(torch.utils.data.TensorDataset):
 			if aug_time:
 				# Apply the time shifts to the frequency domain signals
 				te_x_arr, self.te_time_shifts = time_shift(te_x_arr)
+			te_x_arr = np.array([prewhiten_sample(x) for x in te_x_arr])
 			if outtype == 'complex':
 				# normalize test x_arr with training scalings
 				print("Normalizing x test data (complex)")
@@ -253,18 +276,17 @@ class GlitchDataset(torch.utils.data.TensorDataset):
 				normalize(te_x_arr_irfft, dryrun=True)
 				self.x_arr = (te_x_arr_irfft - train_data.tr_x_mean) / train_data.tr_x_std
 				self.x_arr = torch.tensor(self.x_arr, device=device, dtype=torch.float32)
-    
+
 			# normalize test y_arr with training scalings
 			te_y_arr = te_data['y_arr']
 			print("Normalizing y test data (y1)")
-			normalize(te_y_arr[:,0], dryrun=True)
-			te_y_arr[:,0] = (te_y_arr[:,0] - train_data.tr_y1_mean) / train_data.tr_y1_std
-			print("Normalizing y test data (y2)")
-			normalize(te_y_arr[:,1], dryrun=True)
-			te_y_arr[:,1] = (te_y_arr[:,1] - train_data.tr_y2_mean) / train_data.tr_y2_std
+			for k in range(5):
+				mu = getattr(train_data, f"tr_y{k}_mean")
+				sigma = getattr(train_data, f"tr_y{k}_std")
+				te_y_arr[:, k] = (te_y_arr[:, k] - mu) / sigma
 			self.y_arr = te_y_arr
 			self.y_arr = torch.tensor(self.y_arr, device=device, dtype=torch.float32)
-   
+
 	def __len__(self):
 		return self.size
 
@@ -272,16 +294,16 @@ class GlitchDataset(torch.utils.data.TensorDataset):
 		return self.x_arr[idx], self.y_arr[idx]
 
 def gen_sample(distributions,ifo, ml_model, tosample=['f0', 'gbw', 'amp_r', 'amp_i', 'time']):
-    res = {key:None for key in tosample}
-    for key in tosample:
-        draw = rng.choice(distributions[ifo][ml_model][key])
-        draw_sd = distributions[ifo][ml_model][key + '_sd'][distributions[ifo][ml_model][key].index(draw)]
-        draw_final = rng.normal(draw, draw_sd)
-        res[key] = draw_final
-    return res
+	res = {key:None for key in tosample}
+	for key in tosample:
+		draw = rng.choice(distributions[ifo][ml_model][key])
+		draw_sd = distributions[ifo][ml_model][key + '_sd'][distributions[ifo][ml_model][key].index(draw)]
+		draw_final = rng.normal(draw, draw_sd)
+		res[key] = draw_final
+	return res
 
 def new_init_Snippet(self, invasd):
-        self.invasd = invasd
+		self.invasd = invasd
 
 SnippetNormed = type('SnippetNormed', (antiglitch.SnippetNormed,), {'__init__': new_init_Snippet})
 
@@ -305,5 +327,10 @@ def get_snip(distributions, glitches, ifos, ml_models, tosample=['f0', 'gbw', 'a
 		# check for nans
 		if np.isnan(x).any():
 			return get_snip(distributions, glitches, ifos, ml_models, tosample)
-		y = (snip.inf['f0'], snip.inf['gbw'])
+		amp_r = snip.inf['amp_r']
+		amp_i = snip.inf['amp_i']
+		t = snip.inf['time']
+		f0 = snip.inf['f0']
+		gbw = snip.inf['gbw']
+		y = (amp_r, amp_i, t, f0, gbw)
 		return x, y
