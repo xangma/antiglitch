@@ -1,0 +1,12 @@
+
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "vcvars",
+            "command": "\"C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Auxiliary\\Build\\vcvarsall.bat\"",
+            "type": "shell",
+            "args": ["x86_amd64"],
+        }
+    ]
+}
